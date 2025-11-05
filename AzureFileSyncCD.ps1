@@ -11,7 +11,7 @@ Author   : Mario Mancini
 Version  : 2.0 
 Date     : 03-August-2019 
 Updated  : 03-May-2024 (managed identity)
-Updated  : 02/11/2025 (add sepecifc managed account id)
+Updated  : 02/11/2025 (add specific managed account id, example user managed identity)
 #>
 
 Param ( 
@@ -52,5 +52,6 @@ Write-Output "Get Azure Storage Sync Cloud Endpoint Name: $($cloudEndpoint.Cloud
 
 # Invoke change detection
 Invoke-AzStorageSyncChangeDetection -InputObject $cloudEndpoint -verbose
+
 
 Write-Output "Sync completata"

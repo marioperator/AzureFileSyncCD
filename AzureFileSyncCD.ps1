@@ -1,57 +1,119 @@
 <#
 .DESCRIPTION
-A Runbook example which continuously check for files and directories changes in recursive mode
-For a specific Azure File Share in a specific Sync Group / Cloud Endpoint
-Using the Managed Identity (Service Principal in Azure AD)
+A Runbook example which checks for files and directories changes
+for a specific Azure File Share in a specific Sync Group / Cloud Endpoint
+using Managed Identity.
 
 .NOTES
 Filename : AzureFileSyncCD
 Original Author: Charbel Nemnom (Microsoft MVP/MCT)
 Author   : Mario Mancini
-Version  : 2.0 
-Date     : 03-August-2019 
+Version  : 2.6
+Date     : 03-August-2019
 Updated  : 03-May-2024 (managed identity)
-Updated  : 02/11/2025 (add specific managed account id, example user managed identity)
+Updated  : 02-Nov-2025 (add specific managed account id, example user-assigned managed identity)
+Updated  : 11-Jun-2026 (Path optional for full-share scan, improved MI handling, clearer logging)
 #>
 
-Param ( 
-    [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()] 
-    [String] $AzureSubscriptionId, 
-    [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()]
-    [String] $ResourceGroupName, 
-    [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()]
-    [String] $StorageSyncServiceName, 
-    [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()]
-    [String] $SyncGroupName, 
-    [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()]
-    [String] $Path,
-    [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()]
-    [String] $ManagedIdentityAccountID
-) 
+Param (
+    [Parameter(Mandatory = $true)]
+    [ValidateNotNullOrEmpty()]
+    [string] $AzureSubscriptionId,
 
-# Ensures you do not inherit an AzContext in your runbook 
-Disable-AzContextAutosave -Scope Process 
+    [Parameter(Mandatory = $true)]
+    [ValidateNotNullOrEmpty()]
+    [string] $ResourceGroupName,
 
-# Connect to Azure with user-assigned managed identity
-Connect-AzAccount -Identity -AccountId "$ManagedIdentityAccountID"
+    [Parameter(Mandatory = $true)]
+    [ValidateNotNullOrEmpty()]
+    [string] $StorageSyncServiceName,
+
+    [Parameter(Mandatory = $true)]
+    [ValidateNotNullOrEmpty()]
+    [string] $SyncGroupName,
+
+    [Parameter(Mandatory = $false)]
+    [AllowEmptyString()]
+    [string] $Path = "",
+
+    [Parameter(Mandatory = $false)]
+    [AllowEmptyString()]
+    [string] $ManagedIdentityAccountID = ""
+)
+
+# Ensures you do not inherit an AzContext in your runbook
+Disable-AzContextAutosave -Scope Process
+
+# Connect to Azure with managed identity
+try {
+    if (-not [string]::IsNullOrWhiteSpace($ManagedIdentityAccountID)) {
+        Write-Output "Autenticazione con User-Assigned Managed Identity specificata"
+        Connect-AzAccount -Identity -AccountId $ManagedIdentityAccountID -ErrorAction Stop | Out-Null
+    }
+    else {
+        Write-Output "Autenticazione con Managed Identity associata al runbook"
+        Connect-AzAccount -Identity -ErrorAction Stop | Out-Null
+    }
+}
+catch {
+    throw "Autenticazione con Managed Identity non riuscita. Se il runbook deve usare una User-Assigned Managed Identity specifica, valorizza il parametro 'ManagedIdentityAccountID'. Errore: $($_.Exception.Message)"
+}
 
 # Set Azure Subscription context
-Set-AzContext -SubscriptionId "$AzureSubscriptionId"
+Set-AzContext -SubscriptionId $AzureSubscriptionId -ErrorAction Stop | Out-Null
 
-# Get Cloud Endpoint Name
-$azsync = Get-AzStorageSyncCloudEndpoint -ResourceGroupName "$ResourceGroupName" `
-  -StorageSyncServiceName "$StorageSyncServiceName" -SyncGroupName "$SyncGroupName"
+# Get Cloud Endpoint
+Write-Output "Recupero Cloud Endpoint per SyncGroup: $SyncGroupName"
 
-Write-Output "Get Azure Storage Sync Cloud Endpoint Name: $($azsync.CloudEndpointName)"
+$cloudEndpoint = Get-AzStorageSyncCloudEndpoint `
+    -ResourceGroupName $ResourceGroupName `
+    -StorageSyncServiceName $StorageSyncServiceName `
+    -SyncGroupName $SyncGroupName `
+    -ErrorAction Stop
 
-# CORREZIONE: Usa $SyncGroupName invece di $StorageSyncServiceName
-$cloudEndpoint = Get-AzStorageSyncCloudEndpoint -ResourceGroupName $ResourceGroupName `
-  -StorageSyncServiceName $StorageSyncServiceName -SyncGroupName $SyncGroupName
+# Null / sanity check
+if ($null -eq $cloudEndpoint) {
+    throw "Cloud Endpoint non trovato. Verifica i parametri: ResourceGroup='$ResourceGroupName', StorageSyncService='$StorageSyncServiceName', SyncGroup='$SyncGroupName'."
+}
 
-Write-Output "Get Azure Storage Sync Cloud Endpoint Name: $($cloudEndpoint.CloudEndpointName)"
+if ($cloudEndpoint -is [System.Array]) {
+    throw "Trovati più Cloud Endpoint nel SyncGroup '$SyncGroupName'. Questo script supporta un solo Cloud Endpoint per esecuzione."
+}
+
+# Normalize accidental literal double quotes from job input
+if ($Path -eq '""') {
+    $Path = ""
+}
+
+Write-Output "SyncGroupName: $SyncGroupName"
+Write-Output "CloudEndpointName: $($cloudEndpoint.CloudEndpointName)"
 
 # Invoke change detection
-Invoke-AzStorageSyncChangeDetection -InputObject $cloudEndpoint -verbose
+if ([string]::IsNullOrWhiteSpace($Path)) {
+    Write-Output "DirectoryPath: ''"
+    Write-Output "Avvio change detection su intera share"
 
+    Invoke-AzStorageSyncChangeDetection `
+        -ResourceGroupName $ResourceGroupName `
+        -StorageSyncServiceName $StorageSyncServiceName `
+        -SyncGroupName $SyncGroupName `
+        -CloudEndpointName $($cloudEndpoint.CloudEndpointName) `
+        -Verbose `
+        -ErrorAction Stop
+}
+else {
+    Write-Output "DirectoryPath: '$Path'"
+    Write-Output "Avvio change detection per path specifico (ricorsivo)"
+
+    Invoke-AzStorageSyncChangeDetection `
+        -ResourceGroupName $ResourceGroupName `
+        -StorageSyncServiceName $StorageSyncServiceName `
+        -SyncGroupName $SyncGroupName `
+        -CloudEndpointName $($cloudEndpoint.CloudEndpointName) `
+        -DirectoryPath $Path `
+        -Recursive `
+        -Verbose `
+        -ErrorAction Stop
+}
 
 Write-Output "Sync completata"
